@@ -216,6 +216,7 @@ while [ $# -gt 0 ] ; do
         --prodsplit) PRODSPLIT=$2; shift 2 ;; # allows to set JDL production split level (useful to easily replicate workflows)
         --singularity) SINGULARITY=ON; shift 1 ;; # run everything inside singularity
         --wait) WAITFORALIEN=ON; shift 1 ;; #wait for alien jobs to finish
+        --wait-any) WAITFORALIENANY=ON; WAITFORALIEN=ON; shift 1 ;; #wait for any good==done alien jobs to return
         --outputspec) OUTPUTSPEC=$2; shift 2 ;; #provide comma separate list of JDL file specs to be put as part of JDL Output field (example '"*.log@disk=1","*.root@disk=2"')
 	-h) Usage ; exit ;;
         --help) Usage ; exit ;;
@@ -227,6 +228,7 @@ export JOBTTL
 export JOBLABEL
 export MATTERMOSTHOOK
 export CONTROLSERVER
+
 [[ $PRODSPLIT -gt 100 ]] && echo "Production split needs to be smaller than 100 for the moment" && exit 1
 
 # check for presence of jq (needed in code path to fetch output files)
@@ -270,9 +272,10 @@ pok "Set the job name by running $0 <scriptname> <jobname>"
 # Generate local workdir
 #
 if [[ "${ONGRID}" == "0" ]]; then
-  WORKDIR=${WORKDIR:-/tmp/alien_work/$(basename "$MY_JOBWORKDIR")}
-  [ ! -d "${WORKDIR}" ] && mkdir -p ${WORKDIR}
-  [ ! "${CONTINUE_WORKDIR}" ] && cp "${MY_JOBSCRIPT}" "${WORKDIR}/alien_jobscript.sh"
+  GRID_SUBMIT_WORKDIR=${GRID_SUBMIT_WORKDIR:-${TMPDIR:-/tmp}/alien_work/$(basename "$MY_JOBWORKDIR")}
+  echo "WORKDIR FOR THIS JOB IS ${GRID_SUBMIT_WORKDIR}"
+  [ ! -d "${GRID_SUBMIT_WORKDIR}" ] && mkdir -p ${GRID_SUBMIT_WORKDIR}
+  [ ! "${CONTINUE_WORKDIR}" ] && cp "${MY_JOBSCRIPT}" "${GRID_SUBMIT_WORKDIR}/alien_jobscript.sh"
 fi
 
 # 
@@ -313,6 +316,17 @@ if [[ "${IS_ALIEN_JOB_SUBMITTER}" ]]; then
   # -) Special singularity / Apptainer image
   [[ ! ${IMAGESPEC} ]] && IMAGESPEC=$(grep "^#JDL_IMAGE=" ${SCRIPT} | sed 's/#JDL_IMAGE=//')
   echo "Found Container Image to be ${IMAGESPEC}"
+
+  # -) Requirements-Spec
+  REQUIRESPEC=$(grep "^#JDL_REQUIRE=" ${SCRIPT} | sed 's/#JDL_REQUIRE=//')
+  if [ ! "${REQUIRESPEC}" ]; then
+    echo "No Requirement setting found; Setting to default"
+    REQUIRESPEC="{member(other.GridPartitions,"${GRIDPARTITION:-multicore_8}")};"
+    echo "Requirement is ${REQUIRESPEC}"
+  fi
+
+  echo "Requirements JDL entry is ${REQUIRESPEC}"
+
   # -) PackageSpec
   [[ ! ${PACKAGESPEC} ]] && PACKAGESPEC=$(grep "^#JDL_PACKAGE=" ${SCRIPT} | sed 's/#JDL_PACKAGE=//')
   echo "Found PackagesSpec to be ${PACKAGESPEC}"
@@ -338,7 +352,7 @@ if [[ "${IS_ALIEN_JOB_SUBMITTER}" ]]; then
   cd "$(dirname "$0")"
   THIS_SCRIPT="$PWD/$(basename "$0")"
 
-  cd "${WORKDIR}"
+  cd "${GRID_SUBMIT_WORKDIR}"
 
   QUOT='"'
   # ---- Generate JDL ----------------
@@ -358,6 +372,8 @@ EOF
   echo "Packages = {"${PACKAGESPEC}"};" >> "${MY_JOBNAMEDATE}.jdl"   # add package spec
   [ $ERROROUTPUTSPEC ] && echo "OutputErrorE = {"${ERROROUTPUTSPEC}"};" >> "${MY_JOBNAMEDATE}.jdl"   # add error output files
   [ $IMAGESPEC ] && echo "DebugTag = {\"${IMAGESPEC}\"};" >> "${MY_JOBNAMEDATE}.jdl"   # use special singularity image to run job
+  # echo "Requirements = {"${REQUIREMENTSSPEC}"} >> "${MY_JOBNAMEDATE}.jdl"
+  [ "$REQUIRESPEC" ] && echo "Requirements = ${REQUIRESPEC}" >> "${MY_JOBNAMEDATE}.jdl"
 
 # "output_arch.zip:output/*@disk=2",
 # "checkpoint*.tar@disk=2"
@@ -370,6 +386,8 @@ EOF
     (
       # assemble all GRID interaction in a single script / transaction
       [ -f "${command_file}" ] && rm ${command_file}
+      echo "user ${MY_USER}" >> ${command_file}
+      echo "whoami" >> ${command_file}
       [ ! "${CONTINUE_WORKDIR}" ] && echo "rmdir ${MY_JOBWORKDIR}" >> ${command_file}    # remove existing job dir
       # echo "mkdir ${MY_BINDIR}" >> ${command_file}                      # create bindir
       echo "mkdir ${MY_JOBPREFIX}" >> ${command_file}                   # create job output prefix
@@ -421,11 +439,29 @@ EOF
       continue
     fi
     let counter=0 # reset counter
-    JOBSTATUS=$(alien.py ps -j ${MY_JOBID} | awk '//{print $4}')
-    # echo -ne "Waiting for jobs to return; Last status ${JOBSTATUS}"
+
+    # this is the global job status (a D here means the production is done)
+    JOBSTATUS=$(alien.py ps -j ${MY_JOBID} | awk '//{print $3}') # this is the global job status
+    # in addition we may query individual splits
+    if [ -n "${WAITFORALIENANY}" ]; then
+      DETAILED_STATUS_JSON=$(ALIENPY_JSON=true alien.py ps -a -m "${MY_JOBID}")
+      # check if any is already marked as DONE
+      if jq -e '.results | any(.status == "DONE")' <<<"${DETAILED_STATUS_JSON}" >/dev/null; then
+        JOBSTATUS="D"
+        echo "At least one good job"
+      else
+        # check if there are still jobs running/waiting; if not also finish
+        # this could happen when all jobs are zombies (in which case we also finish)
+        if ! jq -e '.results | any(.status == "WAITING" or .status == "RUNNING" or .status == "SAVING" or .status == "INSERTING")' \
+            <<<"${DETAILED_STATUS_JSON}" >/dev/null; then
+              JOBSTATUS="D"  # some job finished successfully
+              echo "No remaining good job"
+        fi
+      fi
+    fi
 
     if [ "${JOBSTATUS}" == "D" ]; then
-      echo "Job done"
+      echo "${WAITFORALIENANY:+At least one }Job(s) done"
       WAITFORALIEN=""  # guarantees to go out of outer while loop
 
       if [ "${FETCHOUTPUT}" ]; then
@@ -458,10 +494,6 @@ EOF
           done
       fi
     fi
-    if [[ "${FOO:0:1}" == [EK] ]]; then
-      echo "Job error occured"
-      exit 1
-    fi
   done
   # get the job data products locally if requested
 
@@ -475,16 +507,33 @@ if [[ ${SINGULARITY} ]]; then
   # if singularity was asked we restart this script within a container
   # it's actually much like the GRID mode --> which is why we set JALIEN_TOKEN_CERT
   set -x
-  cp $0 ${WORKDIR}
-  singularity exec -C -B /cvmfs:/cvmfs,${WORKDIR}:/workdir --env JALIEN_TOKEN_CERT="foo" --pwd /workdir /cvmfs/alice.cern.ch/containers/fs/singularity/centos7 $0 \
+  cp $0 ${GRID_SUBMIT_WORKDIR}
+
+  # detect architecture (ARM or X86)
+  ARCH=$(uname -i)
+  if [ "$ARCH" == "aarch64" ] || [ "$ARCH" == "x86_64" ]; then
+    echo "Detected hardware architecture : $ARCH"
+  else
+    echo "Invalid architecture ${ARCH} detected. Exiting"
+    exit 1
+  fi
+  if [ "$ARCH" == "aarch64" ]; then
+    ISAARCH64="1"
+  fi
+
+  CONTAINER="/cvmfs/alice.cern.ch/containers/fs/apptainer/compat_el9-${ARCH}"
+  APPTAINER_EXEC="/cvmfs/alice.cern.ch/containers/bin/apptainer/${ARCH}/current/bin/apptainer"
+
+  # we can actually analyse the local JDL to find the package and set it up for the container
+  ${APPTAINER_EXEC} exec -C -B /cvmfs:/cvmfs,${GRID_SUBMIT_WORKDIR}:/workdir --pwd /workdir -C ${CONTAINER} /workdir/grid_submit.sh \
   ${CONTINUE_WORKDIR:+"-c ${CONTINUE_WORKDIR}"} --local ${O2TAG:+--o2tag ${O2TAG}} --ttl ${JOBTTL} --label ${JOBLABEL:-label} ${MATTERMOSTHOOK:+--mattermost ${MATTERMOSTHOOK}} ${CONTROLSERVER:+--controlserver ${CONTROLSERVER}}
   set +x
   exit $?
 fi
 
 if [[ "${ONGRID}" == 0 ]]; then
-  banner "Executing job in directory ${WORKDIR}"
-  cd "${WORKDIR}" 2> /dev/null
+  banner "Executing job in directory ${GRID_SUBMIT_WORKDIR}"
+  cd "${GRID_SUBMIT_WORKDIR}" 2> /dev/null
 fi
 
 exec &> >(tee -a alien_log_${ALIEN_PROC_ID:-0}.txt)
@@ -502,7 +551,6 @@ banner "Limits"
 ulimit -a
 
 banner "OS detection"
-lsb_release -a || true
 cat /etc/os-release || true
 cat /etc/redhat-release || true
 
@@ -563,10 +611,6 @@ if [ "${ONGRID}" = "1" ]; then
   fi
 fi
 
-# ----------- DOWNLOAD ADDITIONAL HELPERS ----------------------------
-# curl -o analyse_CPU.py https://raw.githubusercontent.com/sawenzel/AliceO2/swenzel/cpuana/Utilities/Tools/analyse_CPU.py &> /dev/null
-# chmod +x analyse_CPU.py
-export PATH=$PATH:$PWD
 # export JOBUTILS_MONITORCPU=ON
 # export JOBUTILS_WRAPPER_SLEEP=5
 # export JOBUTILS_JOB_KILLINACTIVE=180 # kill inactive jobs after 3 minutes --> will be the task of pipeline runner? (or make it optional)

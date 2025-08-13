@@ -20,22 +20,24 @@ OUTPUT_SUFFIX=
 
 add_QC_JSON() {
   if [[ ${2} =~ ^consul://.* ]]; then
+    [[ $EPNSYNCMODE == 1 ]] ||  { echo "Error fetching QC JSON $2: consul server is used for EPNSYNCMODE == 1 only" 1>&2 && exit 1; }
     TMP_FILENAME=$FETCHTMPDIR/$1.$RANDOM.$RANDOM.json
     curl -s -o $TMP_FILENAME "http://${GEN_TOPO_QC_CONSUL_SERVER}:8500/v1/kv/${2/consul:\/\//}?raw"
     if [[ $? != 0 ]]; then
-      echo "Error fetching QC JSON $2"
+      echo "Error fetching QC JSON $2 (3)" 1>&2
       exit 1
     fi
   elif [[ ${2} =~ ^apricot://.* ]]; then
+    [[ $EPNSYNCMODE == 1 ]] || { echo "Error fetching QC JSON $2: apricot server is used for EPNSYNCMODE == 1 only" 1>&2 && exit 1; }
     TMP_FILENAME=$FETCHTMPDIR/$1.$RANDOM.$RANDOM.json
-	if [[ ${2} =~ "?" ]]; then
-		curl -s -o $TMP_FILENAME "${GEN_TOPO_QC_APRICOT_SERVER}/${2/apricot:\/\/o2\//}\&run_type=${RUNTYPE:-}\&beam_type=${BEAMTYPE:-}\&process=true"
-	else
-		curl -s -o $TMP_FILENAME "${GEN_TOPO_QC_APRICOT_SERVER}/${2/apricot:\/\/o2\//}?run_type=${RUNTYPE:-}\&beam_type=${BEAMTYPE:-}\&process=true"
-	fi
-    
+	  if [[ ${2} =~ "?" ]]; then
+		  curl -s -o $TMP_FILENAME "${GEN_TOPO_QC_APRICOT_SERVER}/${2/apricot:\/\/o2\//}\&run_type=${RUNTYPE:-}\&beam_type=${BEAMTYPE:-}\&process=true"
+	  else
+		  curl -s -o $TMP_FILENAME "${GEN_TOPO_QC_APRICOT_SERVER}/${2/apricot:\/\/o2\//}?run_type=${RUNTYPE:-}\&beam_type=${BEAMTYPE:-}\&process=true"
+	  fi
+
     if [[ $? != 0 ]]; then
-      echo "Error fetching QC JSON $2"
+      echo "Error fetching QC JSON $2 (4)" 1>&2
       exit 1
     fi
   else
@@ -196,7 +198,7 @@ elif [[ -z ${QC_JSON_FROM_OUTSIDE:-} ]]; then
       else
         QC_JSON_ZDC=$O2DPG_ROOT/DATA/production/qc-async/zdc.json
       fi
-    fi  
+    fi
     if [[ -z "${QC_JSON_EMC:-}" ]]; then
       if [[ "$BEAMTYPE" == "PbPb" ]]; then
         QC_JSON_EMC=$O2DPG_ROOT/DATA/production/qc-async/emc_PbPb.json
@@ -270,13 +272,13 @@ elif [[ -z ${QC_JSON_FROM_OUTSIDE:-} ]]; then
       if [[ $i == "PRIMVTX" ]] && ! has_detector_reco ITS; then continue; fi
       if [[ $i == "ITSTPC" ]] && ! has_detectors_reco ITS TPC; then continue; fi
       add_QC_JSON GLO_$i ${!DET_JSON_FILE}
-   
+
       if [[ $i == "ITSTPC" ]]; then
         LOCAL_FILENAME=${JSON_FILES//*\ /}
         # replace the input sources depending on the detector compostition and matching detectors
         ITSTPCMatchQuery="trackITSTPC:GLO/TPCITS/0;trackITSTPCABREFS:GLO/TPCITSAB_REFS/0;trackITSTPCABCLID:GLO/TPCITSAB_CLID/0;trackTPC:TPC/TRACKS;trackTPCClRefs:TPC/CLUSREFS/0;trackITS:ITS/TRACKS/0;trackITSROF:ITS/ITSTrackROF/0;trackITSClIdx:ITS/TRACKCLSID/0;alpparITS:ITS/ALPIDEPARAM/0?lifetime=condition&ccdb-path=ITS/Config/AlpideParam;SVParam:GLO/SVPARAM/0?lifetime=condition&ccdb-path=GLO/Config/SVertexerParam"
         TRACKSOURCESK0="ITS,TPC,ITS-TPC"
-        if has_processing_step MATCH_SECVTX || has_detector_matching SECVTX; then
+        if [[ $BEAMTYPE != "cosmic" ]] && (has_processing_step MATCH_SECVTX || has_detector_matching SECVTX); then
           if [[ $SYNCMODE == 1 ]] || [[ $EPNSYNCMODE == 1 ]]; then
             HAS_K0_ENABLED=$(jq -r .qc.tasks.MTCITSTPC.taskParameters.doK0QC "${LOCAL_FILENAME}")
           else

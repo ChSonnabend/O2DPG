@@ -43,6 +43,7 @@ if [[ ! -z ${WORKFLOW_DETECTORS_EXCLUDE:-} ]]; then
   done
 fi
 
+if [[ -z "${WORKFLOW_DETECTORS_GPU+x}" ]]; then export WORKFLOW_DETECTORS_GPU="TPC"; fi
 if [[ -z "${WORKFLOW_DETECTORS_QC+x}" ]] || [[ "0$WORKFLOW_DETECTORS_QC" == "0ALL" ]]; then export WORKFLOW_DETECTORS_QC="$WORKFLOW_DETECTORS,$LIST_OF_GLORECO,TOF_MATCH"; fi
 if [[ -z "${WORKFLOW_DETECTORS_CALIB+x}" ]] || [[ "0$WORKFLOW_DETECTORS_CALIB" == "0ALL" ]]; then export WORKFLOW_DETECTORS_CALIB=$WORKFLOW_DETECTORS; fi
 if [[ -z "${WORKFLOW_DETECTORS_RECO+x}" ]] || [[ "0$WORKFLOW_DETECTORS_RECO" == "0ALL" ]]; then export WORKFLOW_DETECTORS_RECO=$WORKFLOW_DETECTORS; fi
@@ -90,7 +91,7 @@ if [[ -z "${FILEWORKDIR:-}" ]];    then export FILEWORKDIR=`pwd`; fi           #
 if [[ -z "${FILEWORKDIRRUN:-}" ]]; then export FILEWORKDIRRUN=$FILEWORKDIR; fi # directory where to find the run-related files (grp, collision context)
 if [[ -z "${RAWINPUTDIR:-}" ]];    then export RAWINPUTDIR=$FILEWORKDIR; fi    # Directory where to find input files (raw files / raw tf files / ctf files)
 if [[ -z "${EPNSYNCMODE:-}" ]];    then export EPNSYNCMODE=0; fi               # Is this workflow supposed to run on EPN for sync processing? Will enable InfoLogger / metrics / fetching QC JSONs from consul...
-if [[ -z "${BEAMTYPE:-}" ]];       then export BEAMTYPE=PbPb; fi               # Beam type, must be PbPb, pp, pPb, cosmic, technical
+if [[ -z "${BEAMTYPE:-}" ]];       then export BEAMTYPE=PbPb; fi               # Beam type, must be PbPb, pp, pPb, pO, Op, OO, NeNe cosmic, technical
 if [[ -z "${RUNTYPE:-}" ]];        then export RUNTYPE=Standalone; fi          # Run Type, standalone for local tests, otherwise PHYSICS, COSMICS, TECHNICAL, SYNTHETIC
 if [[ -z "${IS_SIMULATED_DATA:-}" && $RUNTYPE == "SYNTHETIC" ]]; then export IS_SIMULATED_DATA=1; fi # For SYNTHETIC runs we always process simulated data
 if [[ -z "${IS_SIMULATED_DATA:-}" && ( $RUNTYPE == "PHYSICS" || $RUNTYPE == "COSMICS" ) ]]; then export IS_SIMULATED_DATA=0; fi # For PHYSICS runs we always process simulated data
@@ -101,6 +102,12 @@ if [[ -z "${CALIB_DIR:-}" ]];         then CALIB_DIR="/dev/null"; fi           #
 if [[ -z "${EPN2EOS_METAFILES_DIR:-}" ]]; then EPN2EOS_METAFILES_DIR="/dev/null"; fi # Directory where to store epn2eos files metada, /dev/null : skip their writing
 if [[ -z "${DCSCCDBSERVER:-}" ]];  then export DCSCCDBSERVER="http://alio2-cr1-flp199-ib:8083"; fi # server for transvering calibration data to DCS
 if [[ -z "${DCSCCDBSERVER_PERS:-}" ]]; then export DCSCCDBSERVER_PERS="http://alio2-cr1-flp199-ib:8084"; fi # persistent server for transvering calibration data to DCS
+
+if [[ $BEAMTYPE == "pO" ]] || [[ $BEAMTYPE == "Op" ]] || [[ $BEAMTYPE == "Op" ]] || [[ $BEAMTYPE == "OO" ]] || [[ $BEAMTYPE == "NeNe" ]] ; then
+  export LIGHTNUCLEI=1
+else
+  export LIGHTNUCLEI=0
+fi
 
 if [[ $EPNSYNCMODE == 0 ]]; then
   if [[ -z "${SHMSIZE:-}" ]];       then export SHMSIZE=$(( 8 << 30 )); fi    # Size of shared memory for messages
@@ -143,7 +150,7 @@ if [[ `uname` == Darwin ]]; then export UDS_PREFIX=; else export UDS_PREFIX="@";
 
 # Env variables required for workflow setup
 if [[ $SYNCMODE == 1 ]]; then
-  if [[ -z "${WORKFLOW_DETECTORS_MATCHING+x}" ]]; then export WORKFLOW_DETECTORS_MATCHING="ITSTPC,ITSTPCTRD,ITSTPCTOF,ITSTPCTRDTOF,PRIMVTX"; fi # Select matchings that are enabled in sync mode
+  if [[ -z "${WORKFLOW_DETECTORS_MATCHING+x}" ]]; then export WORKFLOW_DETECTORS_MATCHING="ITSTPC,ITSTPCTRD,ITSTPCTOF,ITSTPCTRDTOF,PRIMVTX,SECVTX"; fi # Select matchings that are enabled in sync mode
 else
   if [[ -z "${WORKFLOW_DETECTORS_MATCHING+x}" ]]; then export WORKFLOW_DETECTORS_MATCHING="ALL"; fi # All matching / vertexing enabled in async mode
 fi
@@ -157,7 +164,7 @@ DISABLE_ROOT_INPUT="--disable-root-input"
 # Special detector related settings
 if [[ -z "${TPC_CORR_SCALING:-}" ]]; then # TPC corr.map lumi scaling options, any combination of --lumi-type <0,1,2> --corrmap-lumi-mode <0,1>  and TPCCorrMap... configurable param
  TPC_CORR_SCALING=
- if [[ $BEAMTYPE == "pp" ]] && has_detector CTP; then TPC_CORR_SCALING+="--lumi-type 1"; fi
+ if [[ $BEAMTYPE == "pp" || $LIGHTNUCLEI == "1" ]] && has_detector CTP; then TPC_CORR_SCALING+="--lumi-type 1"; fi
  if [[ $BEAMTYPE == "PbPb" ]] && has_detector CTP; then TPC_CORR_SCALING+="--lumi-type 1 TPCCorrMap.lumiInstFactor=2.414"; fi
  if [[ $BEAMTYPE == "cosmic" ]]; then TPC_CORR_SCALING=" TPCCorrMap.lumiMean=-1;"; fi # for COSMICS we disable all corrections
  export TPC_CORR_SCALING=$TPC_CORR_SCALING

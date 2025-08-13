@@ -64,7 +64,16 @@ get_test_script_path_for_ini()
 {
     local ini_path=${1}
     local test_script=$(basename ${ini_path})
-    echo $(dirname ${ini_path})/tests/${test_script%.ini}.C
+    local path_to_test_script=$(dirname ${ini_path})/tests/${test_script%.ini}.C
+    if [[ ! -f ${path_to_test_script} ]] ; then
+        # Check if test redirection is applied inside the ini_path file using the #---> syntax
+        local redirection=$(grep "#--->" ${ini_path})
+        if [[ "${redirection}" != "" ]] ; then
+            test_script=$(echo ${redirection} | awk '{print $2}')
+            path_to_test_script=$(dirname ${ini_path})/tests/${test_script}.C
+        fi
+    fi
+    echo ${path_to_test_script}
 }
 
 
@@ -152,8 +161,11 @@ add_ini_files_from_macros()
     # given a list of macros, collect all INI files which contain at least one of them
     local macro_files=$@
     for mf in ${macro_files} ; do
-        # if any, strip the leading O2DPG_ROOT path to only grep for the relative trailing path
-        mf=${mf##${O2DPG_ROOT}/}
+        # Strip anything before MC/config/, if any, to get the macro relative path
+        if [[ "${mf}" == *"MC/config"* ]] ; then
+            mf=${mf#*MC/config/}
+            mf="MC/config/${mf}"
+        fi
         local other_ini_files=$(grep -r -l ${mf} | grep ".ini$")
         # so this macro is not included in any of the INI file,
         # maybe it is included by another macro which is then included in an INI file

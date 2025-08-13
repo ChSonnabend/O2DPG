@@ -14,7 +14,17 @@ import re
 import json
 import math
 import pandas as pd
-import csv
+import subprocess
+import shlex
+
+# hack to find the script for meta upload
+o2dpg_root = os.environ.get("O2DPG_ROOT")
+if o2dpg_root is None:
+  raise EnvironmentError("O2DPG_ROOT is not set in the environment.")
+mc_prodinfo_path = os.path.abspath(os.path.join(o2dpg_root, "MC", "prodinfo"))
+sys.path.append(mc_prodinfo_path)
+from mcprodinfo_ccdb_upload import MCProdInfo, upload_mcprodinfo_meta, query_mcprodinfo
+import dataclasses
 
 # Creates a time anchored MC workflow; positioned within a given run-number (as function of production size etc)
 
@@ -120,6 +130,35 @@ def retrieve_Aggregated_RunInfos(run_number):
             "detList" : detList}
 
 
+def parse_orbits_per_tf(orbitsPerTF, intRate):
+    """
+    Function to determine the number of orbits per TF to be used as
+    a function of interaction rate.
+    """
+    if intRate == None or intRate < 0:
+       return -1
+
+    # Check if the argument is a single integer, in which case we just use it
+    if orbitsPerTF.isdigit():
+        return int(orbitsPerTF)
+
+    # Otherwise we assume that the argument is a string of the form
+    # a1:b1:o1,a2:b2:o2,...
+    # where we apply orbit o2 if the intRate falls between a2 <= intRate < b2.
+    ranges = orbitsPerTF.split(',')
+    for entry in ranges:
+        try:
+            a, b, x = map(int, entry.split(':'))
+            if a <= intRate < b:
+                return x
+        except ValueError:
+            raise ValueError(f"Invalid format in entry: {entry}")
+
+    # if we didn't find a valid range we return -1 which means
+    # that the orbit number will be determined from GRPECS
+    return -1
+
+
 def retrieve_params_fromGRPECS_and_OrbitReset(ccdbreader, run_number, run_start, run_end):
     """
     Retrieves start of run (sor), end of run (eor) and other global parameters from the GRPECS object,
@@ -213,11 +252,52 @@ def retrieve_CTPScalers(ccdbreader, run_number, timestamp=None):
       return ctpscaler
     return None
 
-def retrieve_MinBias_CTPScaler_Rate(ctpscaler, finaltime, trig_eff, NBunches, ColSystem):
+def retrieve_MinBias_CTPScaler_Rate(ctpscaler, finaltime, trig_eff_arg, NBunches, ColSystem, eCM):
     """
-    retrieves the CTP scalers object for a given timestamp and run_number
-    and calculates the interation rate to be applied in Monte Carlo digitizers
+    retrieves the CTP scalers object for a given timestamp
+    and calculates the interation rate to be applied in Monte Carlo digitizers.
+    Uses trig_eff_arg when positive, otherwise calculates the effTrigger.
     """
+    trigger_effs = {
+        "pp": {
+            "1000": 0.68,
+            "6000": 0.737,
+            "default": 0.759
+        },
+        "pO": {
+            "default": 0.8222
+        },
+        "Op": {
+            "default": 0.8222
+        },
+        "OO": {
+            "default": 0.8677
+        },
+        "NeNe": {
+            "default": 0.9147
+        },
+        "PbPb": {
+            "default": 28.0  # this is ZDC
+        }
+    }
+
+    # determine first of all the trigger efficiency
+    effTrigger = trig_eff_arg
+    if effTrigger < 0:
+      # Check if ColSystem is defined in trigger_effs
+      if ColSystem in trigger_effs:
+        if ColSystem == "pp":
+          if eCM < 1000:
+            effTrigger = trigger_effs["pp"]["1000"]
+          elif eCM < 6000:
+            effTrigger = trigger_effs["pp"]["6000"]
+          else:
+            effTrigger = trigger_effs["pp"]["default"]
+        else:
+          effTrigger = trigger_effs[ColSystem]["default"]
+      else:
+        effTrigger = 0.759  # The simulation will fail later if the collision system is not defined
+
     # this is the default for pp
     ctpclass = 0 # <---- we take the scaler for FT0
     ctptype = 1
@@ -227,9 +307,6 @@ def retrieve_MinBias_CTPScaler_Rate(ctpscaler, finaltime, trig_eff, NBunches, Co
       ctptype = 7
     print("Fetching rate with time " + str(finaltime) + " class " + str(ctpclass) + " type " + str(ctptype))
     rate = ctpscaler.getRateGivenT(finaltime, ctpclass, ctptype)
-    #if ColSystem == "PbPb":
-    #  rate.first = rate.first / 28.
-    #  rate.second = rate.second / 28.
 
     print("Global rate " + str(rate.first) + " local rate " + str(rate.second))
     ctp_local_rate_raw = None
@@ -238,7 +315,7 @@ def retrieve_MinBias_CTPScaler_Rate(ctpscaler, finaltime, trig_eff, NBunches, Co
     if rate.first >= 0:
       # calculate true rate (input from Chiara Zampolli) using number of bunches
       coll_bunches = NBunches
-      mu = - math.log(1. - rate.second / 11245 / coll_bunches) / trig_eff
+      mu = - math.log(1. - rate.second / 11245 / coll_bunches) / effTrigger
       finalRate = coll_bunches * mu * 11245
       return finalRate, ctp_local_rate_raw
 
@@ -304,7 +381,7 @@ def determine_timestamp(sor, eor, splitinfo, cycle, ntf, HBF_per_timeframe = 256
     return int(timestamp_of_production), production_offset
 
 
-def exclude_timestamp(ts, orbit, run, filename):
+def exclude_timestamp(ts, orbit, run, filename, global_run_params):
     """
     Checks if timestamp ts (or orbit) falls within a bad data period.
     Returns true if this timestamp should be excluded; false otherwise
@@ -318,17 +395,28 @@ def exclude_timestamp(ts, orbit, run, filename):
     if not os.path.isfile(filename):
        return False
 
-    # Function to detect the delimiter automatically
-    def detect_delimiter(file_path):
-      with open(file_path, 'r') as csvfile:
-        sample = csvfile.read(1024)  # Read a small sample of the file
-        sniffer = csv.Sniffer()
-        delimiter = sniffer.sniff(sample).delimiter
-        return delimiter
-      return ',' # a reasonable default
+    def parse_file(filename):
+      parsed_data = []
+      with open(filename, 'r') as file:
+        for line in file:
+            # Split the line into exactly 4 parts (first three numbers + comment)
+            columns = re.split(r'[,\s;\t]+', line.strip(), maxsplit=3)
 
-    # read txt file into a pandas dataframe ---> if this fails catch exception and return
-    df = pd.read_csv(filename, header=None, names=["Run", "From", "To", "Message"], sep=detect_delimiter(filename))
+            if len(columns) < 3:
+                continue  # Skip lines with insufficient columns
+
+            try:
+                # Extract the first three columns as numbers
+                num1, num2, num3 = map(int, columns[:3])  # Assuming integers in the data
+                comment = columns[3] if len(columns) > 3 else ""
+                parsed_data.append({"Run" : num1, "From" : num2, "To" : num3, "Message" : comment})
+            except ValueError:
+                continue  # Skip lines where first three columns are not numeric
+      return parsed_data
+
+    data = parse_file(filename)
+    # print (data)
+    df = pd.DataFrame(data) # convert to data frame for easy handling
 
     # extract data for this run number
     filtered = df[df['Run'] == run]
@@ -337,23 +425,40 @@ def exclude_timestamp(ts, orbit, run, filename):
     exclude_list =  list(zip(filtered["From"].to_list() , filtered["To"].to_list()))
 
     print("Exclusion list has " + str(len(exclude_list)) + " entries")
-    print(exclude_list)
-
     if len(exclude_list) == 0:
        return False
 
-    data_is_in_orbits = exclude_list[0][0] < 1514761200000
+    timeframelength_intime = global_run_params["EOR"] - global_run_params["SOR"]
+    timeframelength_inorbits = global_run_params["LastOrbit"] - global_run_params["FirstOrbit"]
+    total_excluded_fraction = 0
+    excluded = False
+    for exclusion_entry in exclude_list:
+       #
+       data_is_in_orbits = exclusion_entry[0] < 1514761200000
+       print ("Checking data", exclusion_entry)
+       if data_is_in_orbits:
+          total_excluded_fraction = total_excluded_fraction + (exclusion_entry[1] - exclusion_entry[0]) / (1.*timeframelength_inorbits)
+          if exclusion_entry[0] <= orbit and orbit <= exclusion_entry[1]:
+            print ("Excluding orbit ", str(orbit))
+            excluded = True
+       else:
+          total_excluded_fraction = total_excluded_fraction + (exclusion_entry[1] - exclusion_entry[0]) / (1.*timeframelength_intime)
+          if exclusion_entry[0] <= ts and ts <= exclusion_entry[1]:
+            print ("Excluding timestamp ", str(ts))
+            excluded = True
 
-    if data_is_in_orbits:
-       for orbitspan in exclude_list:
-          if orbitspan[0] <= orbit and orbit <= orbitspan[1]:
-             return True
-    else:
-       for timespan in exclude_list:
-          if timespan[0] <= ts and ts <= timespan[1]:
-             return True
+    print(f"This run as globally {total_excluded_fraction} of it's data marked to be exluded")
+    return excluded
 
-    return False
+def publish_MCProdInfo(mc_prod_info, ccdb_url = "https://alice-ccdb.cern.ch", username = "aliprod", include_meta_into_aod=False):
+   print("Publishing MCProdInfo")
+
+   # see if this already has meta-data uploaded, otherwise do nothing
+   mc_prod_info_q = query_mcprodinfo(ccdb_url, username, mc_prod_info.RunNumber, mc_prod_info.LPMProductionTag)
+   if mc_prod_info_q == None:
+    # could make this depend on hash values in future
+    upload_mcprodinfo_meta(ccdb_url, username, mc_prod_info.RunNumber, mc_prod_info.LPMProductionTag, dataclasses.asdict(mc_prod_info))
+
 
 def main():
     parser = argparse.ArgumentParser(description='Creates an O2DPG simulation workflow, anchored to a given LHC run. The workflows are time anchored at regular positions within a run as a function of production size, split-id and cycle.')
@@ -365,10 +470,11 @@ def main():
     parser.add_argument("--split-id", type=int, help="The split id of this job within the whole production --prod-split)", default=0)
     parser.add_argument("-tf", type=int, help="number of timeframes per job", default=1)
     parser.add_argument("--ccdb-IRate", type=bool, help="whether to try fetching IRate from CCDB/CTP", default=True)
-    parser.add_argument("--trig-eff", type=float, dest="trig_eff", help="Trigger eff needed for IR", default=-1.0)
+    parser.add_argument("--trig-eff", type=float, dest="trig_eff", help="Trigger eff needed for IR (default is automatic mode)", default=-1.0)
     parser.add_argument("--run-time-span-file", type=str, dest="run_span_file", help="Run-time-span-file for exclusions of timestamps (bad data periods etc.)", default="")
     parser.add_argument("--invert-irframe-selection", action='store_true', help="Inverts the logic of --run-time-span-file")
-    parser.add_argument("--orbitsPerTF", type=int, help="Force a certain orbits-per-timeframe number; Automatically taken from CCDB if not given.", default=-1)
+    parser.add_argument("--orbitsPerTF", type=str, help="Force a certain orbits-per-timeframe number; Automatically taken from CCDB if not given.", default="")
+    parser.add_argument('--publish-mcprodinfo', action='store_true', default=False, help="Publish MCProdInfo metadata to CCDB")
     parser.add_argument('forward', nargs=argparse.REMAINDER) # forward args passed to actual workflow creation
     args = parser.parse_args()
     print (args)
@@ -384,49 +490,85 @@ def main():
     run_start = GLOparams["SOR"]
     run_end = GLOparams["EOR"]
 
-    # overwrite with some external choices
-    if args.orbitsPerTF!=-1:
-       print("Adjusting orbitsPerTF from " + str(GLOparams["OrbitsPerTF"]) + " to " + str(args.orbitsPerTF))
-       GLOparams["OrbitsPerTF"] = args.orbitsPerTF
+    mid_run_timestamp = (run_start + run_end) // 2
+
+    # --------
+    # fetch other important global properties needed further below
+    # --------
+    ctp_scalers = retrieve_CTPScalers(ccdbreader, args.run_number, timestamp=mid_run_timestamp)
+    if ctp_scalers is None:
+       print(f"ERROR: Cannot retrive scalers for run number {args.run_number}")
+       exit (1)
+
+    # retrieve the GRPHCIF object (using mid-run timestamp)
+    grplhcif = retrieve_GRPLHCIF(ccdbreader, int(mid_run_timestamp))
+
+    # determine some fundamental physics quantities
+    eCM = grplhcif.getSqrtS()
+    eA = grplhcif.getBeamEnergyPerNucleonInGeV(o2.constants.lhc.BeamDirection.BeamC)
+    eB = grplhcif.getBeamEnergyPerNucleonInGeV(o2.constants.lhc.BeamDirection.BeamA)
+    A1 = grplhcif.getAtomicNumberB1()
+    A2 = grplhcif.getAtomicNumberB2()
+
+    # determine collision system and energy
+    print ("Determined eCM ", eCM)
+    print ("Determined eA ", eA)
+    print ("Determined eB ", eB)
+    print ("Determined atomic number A1 ", A1)
+    print ("Determined atomic number A2 ", A2)
+    ColSystem = ""
+    col_systems = {
+        "pp": (1, 1),
+        "pO": (1, 8),
+        "Op": (8, 1),
+        "OO": (8, 8),
+        "NeNe": (10, 10),
+        "PbPb": (82, 82)
+    }
+    # check if we have a known collision system
+    for system, (a1, a2) in col_systems.items():
+        if A1 == a1 and A2 == a2:
+            ColSystem = system
+            break
+    if ColSystem == "":
+        print(f"ERROR: Unknown collision system for A1={A1}, A2={A2}. Check the GRPLHCIF object.")
+        exit(1)
+
+    print ("Collision system ", ColSystem)
+
+    # possibly overwrite the orbitsPerTF with some external choices
+    if args.orbitsPerTF!="":
+       # we actually need the interaction rate for this calculation
+       # let's use the one provided from IR.txt (async reco) as quick way to make the decision
+       run_rate, _ = retrieve_MinBias_CTPScaler_Rate(ctp_scalers, mid_run_timestamp/1000., args.trig_eff, grplhcif.getBunchFilling().getNBunches(), ColSystem, eCM)
+       determined_orbits = parse_orbits_per_tf(args.orbitsPerTF, run_rate)
+       if determined_orbits != -1:
+         print("Adjusting orbitsPerTF from " + str(GLOparams["OrbitsPerTF"]) + " to " + str(determined_orbits))
+         GLOparams["OrbitsPerTF"] = determined_orbits
 
     # determine timestamp, and production offset for the final MC job to run
     timestamp, prod_offset = determine_timestamp(run_start, run_end, [args.split_id - 1, args.prod_split], args.cycle, args.tf, GLOparams["OrbitsPerTF"])
-    # determine orbit corresponding to timestamp
-    orbit = GLOparams["FirstOrbit"] + (timestamp - GLOparams["SOR"]) / LHCOrbitMUS
 
-    # check if timestamp is to be excluded
-    job_is_exluded = exclude_timestamp(timestamp, orbit, args.run_number, args.run_span_file)
-    # possibly invert the selection
-    if args.invert_irframe_selection:
-       job_is_exluded = not job_is_exluded
+    # determine orbit corresponding to timestamp (mainly used in exclude_timestamp function)
+    orbit = GLOparams["FirstOrbit"] + int((timestamp - GLOparams["SOR"]) / ( LHCOrbitMUS / 1000))
 
     # this is anchored to
     print ("Determined start-of-run to be: ", run_start)
     print ("Determined end-of-run to be: ", run_end)
     print ("Determined timestamp to be : ", timestamp)
     print ("Determined offset to be : ", prod_offset)
+    print ("SOR ", GLOparams["SOR"])
+    print ("EOR ", GLOparams["EOR"])
+    print ("TIM ", timestamp) # this timestamp
+    print ("OS ", GLOparams["FirstOrbit"])
+    print ("OE ", GLOparams["LastOrbit"])
+    print ("TO ", orbit) # this orbit
 
-
-    # retrieve the GRPHCIF object
-    grplhcif = retrieve_GRPLHCIF(ccdbreader, int(timestamp))
-    eCM = grplhcif.getSqrtS()
-    A1 = grplhcif.getAtomicNumberB1()
-    A2 = grplhcif.getAtomicNumberB2()
-
-    # determine collision system and energy
-    print ("Determined eMC ", eCM)
-    print ("Determined atomic number A1 ", A1)
-    print ("Determined atomic number A2 ", A2)
-    ColSystem = ""
-    if A1 == 82 and A2 == 82:
-      ColSystem = "PbPb"
-    elif A1 == 1 and A2 == 1:
-      ColSystem = "pp"
-    else:
-      print ("Unknown collision system ... exiting")
-      exit (1)
-
-    print ("Collision system ", ColSystem)
+    # check if timestamp is to be excluded
+    job_is_exluded = exclude_timestamp(timestamp, orbit, args.run_number, args.run_span_file, GLOparams)
+    # possibly invert the selection
+    if args.invert_irframe_selection:
+       job_is_exluded = not job_is_exluded
 
     forwardargs = " ".join([ a for a in args.forward if a != '--' ])
     # retrieve interaction rate
@@ -434,25 +576,7 @@ def main():
     ctp_local_rate_raw = None
 
     if args.ccdb_IRate == True:
-       effTrigger = args.trig_eff
-       if effTrigger < 0:
-         if ColSystem == "pp":
-           if eCM < 1000:
-             effTrigger = 0.68
-           elif eCM < 6000:
-             effTrigger = 0.737
-           else:
-             effTrigger = 0.759
-         elif ColSystem == "PbPb":
-           effTrigger = 28.0 # this is ZDC
-         else:
-           effTrigger = 0.759
-       ctp_scalers = retrieve_CTPScalers(ccdbreader, args.run_number)
-       if ctp_scalers is None:
-         print(f"ERROR: Cannot retrive scalers for run number {args.run_number}")
-         exit (1)
-       # time needs to be converted to seconds ==> timestamp / 1000
-       rate, ctp_local_rate_raw = retrieve_MinBias_CTPScaler_Rate(ctp_scalers, timestamp/1000., effTrigger, grplhcif.getBunchFilling().getNBunches(), ColSystem)
+       rate, ctp_local_rate_raw = retrieve_MinBias_CTPScaler_Rate(ctp_scalers, timestamp/1000., args.trig_eff, grplhcif.getBunchFilling().getNBunches(), ColSystem, eCM)
 
        if rate != None:
          # if the rate calculation was successful we will use it, otherwise we fall back to some rate given as part
@@ -468,8 +592,11 @@ def main():
     # we finally pass forward to the unanchored MC workflow creation
     # TODO: this needs to be done in a pythonic way clearly
     # NOTE: forwardargs can - in principle - contain some of the arguments that are appended here. However, the last passed argument wins, so they would be overwritten.
+    energyarg = (" -eCM " + str(eCM)) if A1 == A2 else (" -eA " + str(eA) + " -eB " + str(eB))
     forwardargs += " -tf " + str(args.tf) + " --sor " + str(run_start) + " --timestamp " + str(timestamp) + " --production-offset " + str(prod_offset) + " -run " + str(args.run_number) + " --run-anchored --first-orbit "       \
-                   + str(GLOparams["FirstOrbit"]) + " -field ccdb -bcPatternFile ccdb" + " --orbitsPerTF " + str(GLOparams["OrbitsPerTF"]) + " -col " + str(ColSystem) + " -eCM " + str(eCM) + ' --readoutDets ' + GLOparams['detList']
+                   + str(GLOparams["FirstOrbit"]) + " -field ccdb -bcPatternFile ccdb" + " --orbitsPerTF " + str(GLOparams["OrbitsPerTF"]) + " -col " + str(ColSystem) + str(energyarg)
+    if not '--readoutDets' in forwardargs:
+       forwardargs += ' --readoutDets ' + GLOparams['detList']
     print ("forward args ", forwardargs)
     cmd = "${O2DPG_ROOT}/MC/bin/o2dpg_sim_workflow.py " + forwardargs
 
@@ -477,7 +604,34 @@ def main():
       print ("TIMESTAMP IS EXCLUDED IN RUN")
     else:
       print ("Creating time-anchored workflow...")
-      os.system(cmd)
+      print ("Executing: " + cmd)
+      try:
+        cmd_list = shlex.split(os.path.expandvars(cmd))
+        output = subprocess.check_output(cmd_list, text=True, stdin=subprocess.DEVNULL, timeout = 120)
+        print (output)
+
+        # when we get here, we can publish info about the production (optionally)
+        if args.publish_mcprodinfo == True or os.getenv("PUBLISH_MCPRODINFO") != None:
+          prod_tag = os.getenv("ALIEN_JDL_LPMPRODUCTIONTAG")
+          grid_user_name = os.getenv("JALIEN_USER")
+          mcprod_ccdb_server = os.getenv("PUBLISH_MCPRODINFO_CCDBSERVER")
+          if mcprod_ccdb_server == None:
+            mcprod_ccdb_server = "https://alice-ccdb.cern.ch"
+          if prod_tag != None and grid_user_name != None:
+            info = MCProdInfo(LPMProductionTag = prod_tag,
+                              Col = ColSystem,
+                              IntRate =rate,
+                              RunNumber = args.run_number,
+                              OrbitsPerTF = GLOparams["OrbitsPerTF"])
+            publish_MCProdInfo(info, username = grid_user_name, ccdb_url = mcprod_ccdb_server)
+          else:
+            print("No production tag or GRID user name known. Not publishing MCProdInfo")
+
+      except subprocess.CalledProcessError as e:
+        print(f"Command failed with return code {e.returncode}")
+        print("Output:")
+        print(e.output)
+        return {}, {}
 
 if __name__ == "__main__":
   sys.exit(main())

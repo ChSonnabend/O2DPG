@@ -9,8 +9,6 @@
 [ ! "${O2DPG_ROOT}" ] && echo "Error: This needs O2DPG loaded" && exit 1
 [ ! "${O2_ROOT}" ] && echo "Error: This needs O2 loaded" && exit 1
 
-# ----------- LOAD UTILITY FUNCTIONS --------------------------
-. ${O2_ROOT}/share/scripts/jobutils.sh
 
 # ----------- START ACTUAL JOB  -----------------------------
 
@@ -38,7 +36,7 @@ MEMLIMIT=${MEMLIMIT:+--mem-limit ${MEMLIMIT}}
 CPULIMIT=${CPULIMIT:+--cpu-limit ${CPULIMIT}}
 
 # create workflow
-${O2DPG_ROOT}/MC/bin/o2dpg_sim_workflow.py -eCM 13600  -col pp -gen pythia8 -proc inel -tf ${NTFS} \
+${O2DPG_ROOT}/MC/bin/o2dpg_sim_workflow.py -eCM 13600  -seed 12345 -col pp -gen pythia8 -proc inel -tf ${NTFS} \
                                                        -ns ${NEVENTS} -e ${SIMENGINE} -run 301000  \
                                                        -j ${NWORKERS} -interactionRate ${INTRATE}  \
                                                        --include-qc --include-analysis

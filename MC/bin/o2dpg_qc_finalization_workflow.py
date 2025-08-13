@@ -14,6 +14,7 @@ import sys
 import argparse
 from os import environ, mkdir
 from os.path import join, dirname, isdir
+import re
 
 sys.path.append(join(dirname(__file__), '.', 'o2dpg_workflow_utils'))
 
@@ -48,9 +49,17 @@ def include_all_QC_finalization(ntimeframes, standalone, run, productionTag, con
       needs = [taskName + '_local' + str(tf) for tf in range(1, ntimeframes + 1)]
 
     task = createTask(name=QC_finalize_name(taskName), needs=needs, cwd=qcdir, lab=["QC"], cpu=1, mem='2000')
-    task['cmd'] = f'o2-qc --config {qcConfigPath} --remote-batch {taskName}.root' + \
+    def remove_json_prefix(path):
+           return re.sub(r'^json://', '', path)
+
+    configFilePathOnDisk = remove_json_prefix(qcConfigPath)
+    # we check if the configFilePath actually exists in the currently loaded software. Otherwise we exit immediately and gracefully
+    task['cmd'] = ' if [ -f ' + configFilePathOnDisk + ' ]; then { '
+    task['cmd'] += f'o2-qc --config {qcConfigPath} --remote-batch {taskName}.root' + \
                   f' --override-values "qc.config.database.host={qcdbHost};qc.config.Activity.number={run};qc.config.Activity.type=PHYSICS;qc.config.Activity.periodName={productionTag};qc.config.Activity.beamType={beamType};qc.config.conditionDB.url={conditionDB}"' + \
                   ' ' + getDPL_global_options()
+    task['cmd'] += ' ;} else { echo "Task ' + taskName + ' not performed due to config file not found "; } fi'
+
     stages.append(task)
 
   ## Adds a postprocessing QC workflow
@@ -97,6 +106,17 @@ def include_all_QC_finalization(ntimeframes, standalone, run, productionTag, con
   add_QC_finalization('ITSTracksClusters', 'json://${O2DPG_ROOT}/MC/config/QC/json/its-clusters-tracks-qc.json')
   if isActive('MID'):
      add_QC_finalization('MIDTaskQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/mid-task.json')
+  if isActive('MCH'):
+     add_QC_finalization('MCHDigitsTaskQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/mch-digits-task.json')
+     add_QC_finalization('MCHErrorsTaskQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/mch-errors-task.json')
+     add_QC_finalization('MCHRecoTaskQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/mch-reco-task.json')
+     add_QC_finalization('MCHTracksTaskQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/mch-tracks-task.json')
+  if isActive('MCH') and isActive('MID'):
+     add_QC_finalization('MCHMIDTracksTaskQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/mchmid-tracks-task.json')
+  if isActive('MCH') and isActive('MID') and isActive('MFT'):
+     add_QC_finalization('MUONTracksMFTTaskQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/mftmchmid-tracks-task.json')
+  elif isActive('MCH') and isActive('MFT'):
+     add_QC_finalization('MCHMFTTaskQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/mftmch-tracks-task.json')
   if isActive('FT0') and isActive('TRD'):
      add_QC_finalization('tofft0PIDQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/pidft0tof.json')
   elif isActive('FT0'):
@@ -106,6 +126,8 @@ def include_all_QC_finalization(ntimeframes, standalone, run, productionTag, con
   else:
      add_QC_finalization('tofPIDQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/pidtofNoTRD.json')
   add_QC_finalization('RecPointsQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/ft0-reconstruction-config.json')
+  add_QC_finalization('FV0DigitsQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/fv0-digits.json')
+  add_QC_finalization('FDDRecPointsQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/fdd-recpoints.json')
   add_QC_finalization('CPVDigitsQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/cpv-digits-task.json')
   add_QC_finalization('CPVClustersQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/cpv-clusters-task.json')
   add_QC_finalization('PHSCellsClustersQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/phs-cells-clusters-task.json')

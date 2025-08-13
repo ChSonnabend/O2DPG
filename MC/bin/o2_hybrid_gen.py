@@ -57,6 +57,7 @@ def main():
     parser.add_argument('--mode', type=str, help='Run generator in sequential or parallel mode for quicker event generation (multi-threading)')
     parser.add_argument('--output', type=str, required=True, help='Output JSON file path')
     parser.add_argument('--clone', type=int, help='Number of clones to make of the generator list')
+    parser.add_argument('--trigger', action='store_true', help='Add triggers to the template JSON file')
 
     args = parser.parse_args()
 
@@ -68,6 +69,11 @@ def main():
         print("Setting sequential mode as default")
     else:
         print(f"Running in {mode} mode")
+
+    # Available options for trigger are "off", "or", "and"
+    # in all the other cases the trigger is forced "off"
+
+    add_trigger = lambda d: d.update({"triggers": {"mode": "off", "specs": [{"macro": "", "function": ""}]}}) if args.trigger else None
 
     # put in a list all the elementes in the gen flag
     noConfGen = ["pythia8pp", "pythia8hf", "pythia8hi", "pythia8powheg"]
@@ -88,17 +94,20 @@ def main():
                             "confighepmc": configs[1]
                         }
                     })
+                    add_trigger(gens[-1])
                 else:
                     configs = get_params(gens_instances[gen],gens_params[gen])
                     gens.append({
                         'name': gen,
                         'config': configs
                     })
+                    add_trigger(gens[-1])
             elif gen in noConfGen:
                 gens.append({
                     "name": gen,
                     "config": ""
                 })
+                add_trigger(gens[-1])
             else:
                 print(f"Generator {gen} not found in the list of available generators")
                 exit(1)
@@ -115,6 +124,7 @@ def main():
                 'name': 'external',
                 'config': configs
             })
+            add_trigger(gens[-1])
 
     if args.clone:
         if args.clone < 2:
