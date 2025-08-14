@@ -164,7 +164,7 @@ parser.add_argument('--fwdmatching-cut-4-param', action='store_true', help='appl
 parser.add_argument('--fwdmatching-save-trainingdata', action='store_true', help='enables saving parameters at plane for matching training with machine learning')
 
 ### OWN STUFF
-parser.add_argument('--ideal-clusterizer-mode', default=2, help="Mode of the ideal clusterizer (0=disabled, 1=ideal clusterizer, 2=ideal clusterizer with full readout)")
+parser.add_argument('--mc-clusterization-mode', default=2, help="Mode of the ideal clusterizer (0=disabled, 1=ideal clusterizer, 2=ideal clusterizer with full readout)")
 parser.add_argument('--ideal-clusterizer-padsize', default=3, help="Pad size of accumulation of the ideal clusterizer")
 parser.add_argument('--ideal-clusterizer-timesize', default=6, help="Time size of accumulation of the ideal clusterizer")
 parser.add_argument('--tpc-reco-confkeyvalues', default=";", help="configKeyValues passed to the tpc-reco-workflow")
@@ -1037,7 +1037,7 @@ for tf in range(1, NTIMEFRAMES + 1):
                          + ' --onlyDet TPC --TPCuseCCDB --interactionRate ' + str(INTRATE) + '  --tpc-lanes ' + str(NWORKERS_TF)             \
                          + ' --incontext ' + str(CONTEXTFILE) + ' --disable-write-ini --early-forward-policy always --forceSelectedDets ' \
                          + ' --tpc-distortion-type ' + str(tpcDistortionType)                                                             \
-                         + ' --ideal-clusterizer-mode ' + str(args.ideal_clusterizer_mode) \
+                         + ' --mc-clusterization-mode ' + str(args.mc_clusterization_mode) \
                          + ' --ideal-clusterizer-padsize ' + str(args.ideal_clusterizer_padsize) \
                          + ' --ideal-clusterizer-timesize ' + str(args.ideal_clusterizer_timesize) \
                          + putConfigValues(["TPCGasParam","TPCGEMParam","TPCEleParam","TPCITCorr","TPCDetParam"],
