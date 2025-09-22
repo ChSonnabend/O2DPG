@@ -40,6 +40,8 @@ for i in "${!headers[@]}"; do
     headers[$i]=$(echo "${headers[$i]}" | sed -E 's/#?%\{//;s/\}//g')
 done
 
+TOPWORKDIR=""
+
 # Read and process each subsequent line
 {
     read  # Skip the header line
@@ -83,6 +85,8 @@ done
         # inject custom repo if available
         if [ "${O2DPG_CUSTOM_REPO}" ]; then
           sed -i "s|%{O2DPG_CUSTOM_REPO}|${O2DPG_CUSTOM_REPO}|g" "$OUTPUT_FILE_FINAL"
+        else
+          sed -i "/%{O2DPG_CUSTOM_REPO}/d" "$OUTPUT_FILE_FINAL"
         fi
 
         TOPWORKDIR=2tag_release_testing_${BUILD_TAG:-${SOFTWARETAG_SIM}}
@@ -158,6 +162,8 @@ for s in submit*.sh; do
   if [[ -z ${WORKFLOWS_FOUND} || -z ${AODS_FOUND} ]]; then
     echo "❌ Missing files for case $s: Check here for logs ${urls[${s}]}"
     FINAL_SUCCESS=1  # mark as failure
+    # also upload log file to AliEn for later inspection
+    alien.py cp file:./log_${s} alien:~/${TOPWORKDIR}
   else
     echo "✅ Files found in $s"
   fi
