@@ -100,6 +100,7 @@ alien-token-info >/dev/null 2>&1
 
 # Allow for both "ALIEN_JDL_LPM<KEY>" as well as "KEY"
 
+export DO_NOT_RUN_SIM=${DO_NOT_RUN_SIM:-0} # if set to 1, the actual sim workflow will not be run, just the config created
 # the only four where there is a real default for
 export ALIEN_JDL_CPULIMIT=${ALIEN_JDL_CPULIMIT:-${CPULIMIT:-8}}
 export ALIEN_JDL_SIMENGINE=${ALIEN_JDL_SIMENGINE:-${SIMENGINE:-TGeant4}}
@@ -335,6 +336,10 @@ if [ "${WF_RC}" != "0" ] ; then
     echo_error "Problem during anchor timestamp sampling and workflow creation. Exiting."
     exit ${WF_RC}
 fi
+if [ "${DO_NOT_RUN_SIM}" == "1" ]; then
+  echo_info "Skipping the MC workflow execution as requested by DO_NOT_RUN_SIM=1"
+  exit 0
+fi
 
 TIMESTAMP=`grep "Determined timestamp to be" ${anchoringLogFile} | awk '//{print $6}'`
 echo_info "TIMESTAMP IS ${TIMESTAMP}"
@@ -380,7 +385,7 @@ fi
 
 # -- RUN THE MC WORKLOAD TO PRODUCE AOD --
 
-export FAIRMQ_IPC_PREFIX=./
+export FAIRMQ_IPC_PREFIX="${FAIRMQ_IPC_PREFIX:-./}"
 
 echo_info "Ready to start main workflow"
 
